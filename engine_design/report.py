@@ -125,8 +125,40 @@ def plot_cooling(design, path):
 
     for a in axes:
         a.axvline(0, color=AXIS, lw=0.8)
+    film = f", {s.film_fraction:.0%} fuel film" if s.film_fraction > 0 else ""
     fig.suptitle(f"{s.name}: regenerative cooling, {s.channels.n} channels, {s.coolant.name} coolant, "
-                 f"{s.wall.name} liner", x=0.01, ha="left", fontsize=10, color=INK_2)
+                 f"{s.wall.name} liner{film}", x=0.01, ha="left", fontsize=10, color=INK_2)
+    fig.savefig(path, dpi=160)
+    plt.close(fig)
+
+
+def plot_film(design, path):
+    f, s = design.film, design.spec
+    x = f.x * 1e3
+    fig, axes = plt.subplots(2, 1, figsize=(10, 6.5), sharex=True, constrained_layout=True)
+
+    ax = axes[0]
+    ax.plot(x, f.T0_wall, color=SERIES[0])
+    ax.axhline(f.Tc_core, color=MUTED, lw=1.0, ls="--")
+    ax.annotate(f"Core gas {f.Tc_core:.0f} K", (x[0], f.Tc_core), xytext=(2, -14),
+                textcoords="offset points", fontsize=9, color=INK_2)
+    ax.set_title("Temperature of the gas layer next to the wall")
+    ax.set_ylabel("Stagnation T (K)")
+
+    ax = axes[1]
+    ax.plot(x, f.of_wall, color=SERIES[0])
+    ax.axhline(f.of_core, color=MUTED, lw=1.0, ls="--")
+    ax.annotate(f"Core O/F {f.of_core:.2f}", (x[0], f.of_core), xytext=(2, -14),
+                textcoords="offset points", fontsize=9, color=INK_2)
+    ax.set_title("Wall-layer mixture ratio as core gas mixes in")
+    ax.set_ylabel("O/F")
+    ax.set_xlabel("Axial position from throat (mm)")
+
+    for a in axes:
+        a.axvline(0, color=AXIS, lw=0.8)
+        a.set_xlim(x[0], x[-1])
+    fig.suptitle(f"{s.name}: fuel film cooling, {f.film_fraction:.0%} of fuel, mixing coefficient "
+                 f"Kt = {f.K_t:g}", x=0.01, ha="left", fontsize=10, color=INK_2)
     fig.savefig(path, dpi=160)
     plt.close(fig)
 
@@ -151,4 +183,6 @@ def write_reports(design, out_dir) -> dict:
     plot_contour(design, out / "contour.png")
     if design.cool is not None:
         plot_cooling(design, out / "cooling.png")
+    if design.film is not None:
+        plot_film(design, out / "film.png")
     return summary

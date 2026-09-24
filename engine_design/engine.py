@@ -3,8 +3,9 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-from . import cooling, injector, nozzle
+from . import cooling, film, injector, nozzle
 from .combustion import G0, Performance, optimum_of, performance
+from .film import FilmResult
 from .propellants import Propellant
 
 
@@ -30,6 +31,9 @@ class EngineSpec:
     coolant: cooling.Coolant | None = None   # None -> no regen analysis
     wall: cooling.Wall = cooling.CUCRZR
     channels: cooling.Channels | None = None
+    # Film cooling
+    film_fraction: float = 0.0    # fraction of fuel injected as a wall film
+    film_mixing: float = 0.005    # turbulent mixing coefficient K_t (see film.py)
     # Injector
     n_elements: int = 12
     injector_dp_frac: float = 0.20
@@ -52,6 +56,7 @@ class EngineDesign:
     geom: nozzle.ChamberGeometry
     inj: injector.InjectorDesign
     cool: cooling.CoolingResult | None = field(default=None)
+    film: FilmResult | None = field(default=None)
 
     def summary(self) -> dict:
         s, g, p = self.spec, self.geom, self.perf
@@ -88,6 +93,19 @@ class EngineDesign:
             "injector_fuel_velocity_m_s": self.inj.fuel.v,
             "injector_resultant_angle_deg": self.inj.resultant_angle_deg,
         }
+        if self.film is not None:
+            f = self.film
+            d.update({
+                "film_fraction_of_fuel": f.film_fraction,
+                "film_mixing_coefficient": f.K_t,
+                "film_core_mixture_ratio": f.of_core,
+                "film_core_temperature_K": f.Tc_core,
+                "film_wall_layer_of_at_throat": f.of_wall_throat,
+                "film_core_entrained_at_throat": f.entrained_at_throat,
+                "film_isp_penalty_pct": 100 * (1 - f.isp_ideal / self.perf.isp(s.pa)),
+                "injector_film_orifices": self.inj.film.n,
+                "injector_film_orifice_mm": self.inj.film.d * 1e3,
+            })
         if self.cool is not None:
             d.update({f"cooling_{k}": v for k, v in self.cool.summary().items()})
         return d
@@ -101,31 +119,56 @@ def design(spec: EngineSpec) -> EngineDesign:
         spec.oxidizer, spec.fuel, spec.pc, spec.of_bounds, pa=spec.pa, **exp)
     perf = performance(spec.oxidizer, spec.fuel, of, spec.pc, **exp)
 
-    # Delivered performance: Isp = eta_c* * eta_cf * Isp_ideal
-    isp_ideal = perf.isp(spec.pa)
-    isp = spec.eta_cstar * spec.eta_cf * isp_ideal
-    cstar = spec.eta_cstar * perf.cstar
-    cf = isp * G0 / cstar
+    # Ideal performance; with film cooling this becomes the two-stream value,
+    # which depends on the geometry, which depends on the performance, so the
+    # sizing is iterated to convergence.
+    isp_ideal, cstar_ideal = perf.isp(spec.pa), perf.cstar
+    fr = None
+    for _ in range(10):
+        # Delivered performance: Isp = eta_c* * eta_cf * Isp_ideal
+        isp = spec.eta_cstar * spec.eta_cf * isp_ideal
+        cstar = spec.eta_cstar * cstar_ideal
+        cf = isp * G0 / cstar
 
-    mdot = spec.thrust / (isp * G0)
+        mdot = spec.thrust / (isp * G0)
+        At = mdot * cstar / spec.pc
+        Rt = np.sqrt(At / np.pi)
+        geom = nozzle.chamber_contour(Rt, perf.eps, spec.contraction_ratio, spec.L_star,
+                                      spec.theta_c, spec.bell_fraction)
+        if spec.film_fraction <= 0:
+            break
+        T_film0 = spec.coolant.T_limit if spec.coolant is not None else 400.0
+        fr = film.wall_layer(geom, spec.oxidizer, spec.fuel, of, spec.pc, perf.eps, spec.pa, mdot,
+                             spec.film_fraction, spec.film_mixing, T_film0)
+        converged = abs(fr.isp_ideal - isp_ideal) < 1e-4 * isp_ideal
+        isp_ideal, cstar_ideal = fr.isp_ideal, fr.cstar_ideal
+        if converged:
+            break
+
     mdot_ox = mdot * of / (1 + of)
     mdot_f = mdot - mdot_ox
-    At = mdot * cstar / spec.pc
-    Rt = np.sqrt(At / np.pi)
 
-    geom = nozzle.chamber_contour(Rt, perf.eps, spec.contraction_ratio, spec.L_star,
-                                  spec.theta_c, spec.bell_fraction)
-
-    inj = injector.unlike_doublet(mdot_ox, spec.oxidizer.density, mdot_f, spec.fuel.density,
+    # The injector's doublets carry the core flow; the film fuel has its own orifices.
+    mdot_f_core = mdot_f * (1 - spec.film_fraction)
+    inj = injector.unlike_doublet(mdot_ox, spec.oxidizer.density, mdot_f_core, spec.fuel.density,
                                   spec.pc, spec.n_elements, spec.injector_dp_frac, spec.injector_cd)
+    if spec.film_fraction > 0:
+        inj.film = injector.size_orifices("film", mdot_f - mdot_f_core, spec.fuel.density,
+                                          spec.injector_dp_frac * spec.pc, 2 * spec.n_elements,
+                                          spec.injector_cd)
 
     cool = None
     if spec.coolant is not None:
+        # Gas-side convection is driven by the core flow; the film sets the
+        # temperature of the gas next to the wall.
+        core = perf if fr is None else performance(spec.oxidizer, spec.fuel, fr.of_core, spec.pc,
+                                                   eps=perf.eps)
         cool = cooling.regen_analysis(
-            geom, pc=spec.pc, cstar=perf.cstar, T0=perf.Tc, gamma=perf.gamma_c,
-            cp_gas=perf.cp_c, molar_mass=perf.molar_mass_c, mdot_coolant=mdot_f,
+            geom, pc=spec.pc, cstar=core.cstar, T0=core.Tc, gamma=core.gamma_c,
+            cp_gas=core.cp_c, molar_mass=core.molar_mass_c, mdot_coolant=mdot_f,
             coolant=spec.coolant, wall=spec.wall, channels=spec.channels,
+            T0_wall=None if fr is None else fr.T0_at,
         )
 
     return EngineDesign(spec, perf, of, isp_ideal, isp, cstar, cf, mdot, mdot_ox, mdot_f,
-                        At, geom, inj, cool)
+                        At, geom, inj, cool, fr)

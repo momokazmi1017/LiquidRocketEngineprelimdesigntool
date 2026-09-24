@@ -3,7 +3,8 @@
 A Python toolkit that takes top-level requirements (thrust, chamber pressure,
 propellants) and produces a complete preliminary thrust-chamber design:
 equilibrium combustion performance, chamber and bell-nozzle geometry,
-injector orifice sizing, and a 1-D regenerative cooling analysis.
+injector orifice sizing, and a 1-D regenerative cooling analysis with fuel
+film cooling.
 
 The combustion solver is validated against published reference data (see
 [Validation](#validation)) and every physical relation is covered by tests.
@@ -19,20 +20,21 @@ The combustion solver is validated against published reference data (see
 | Propellants | LOX / 75 % ethanol + 25 % water |
 | Mixture ratio | 1.30 (fuel-rich of the 1.38 Isp peak, for cooling margin) |
 | Efficiencies | η<sub>c\*</sub> = 0.94, η<sub>Cf</sub> = 0.98 |
+| Cooling | Regenerative (all fuel) + 5 % of fuel as wall film |
 
 | Result | Value |
 |---|---|
-| Chamber temperature | 3081 K |
-| Isp, ideal / delivered (sea level) | 247.3 s / 227.8 s |
-| Isp, vacuum (ideal) | 278.2 s |
-| Total mass flow | 2.24 kg/s (1.27 ox, 0.97 fuel) |
-| Throat / chamber / exit diameter | 42.1 / 103.2 / 89.6 mm |
+| Chamber temperature (overall / core) | 3081 K / 3110 K |
+| Isp, ideal / delivered (sea level) | 245.2 s / 225.9 s (incl. 0.8 % film penalty) |
+| Isp, vacuum (ideal, no film) | 278.2 s |
+| Total mass flow | 2.26 kg/s (1.28 ox, 0.98 fuel) |
+| Throat / chamber / exit diameter | 42.1 / 103.1 / 89.5 mm |
 | Area ratio | 4.53 |
 | Overall length | 286 mm |
-| Peak heat flux (throat) | 21.4 MW/m² |
-| Peak hot-wall temperature | 758 K (CuCrZr limit 800 K) |
-| Coolant temperature rise | 298 → 478 K |
-| Coolant pressure drop | 3.1 bar |
+| Peak heat flux | 15.8 MW/m² |
+| Peak hot-wall temperature | 658 K (CuCrZr limit 800 K) |
+| Coolant temperature rise | 298 → 392 K |
+| Coolant pressure drop | 3.4 bar |
 
 ![Mixture ratio sweep](outputs/E5-75/of_sweep.png)
 ![Chamber contour](outputs/E5-75/contour.png)
@@ -56,10 +58,39 @@ count, depth, rib width and wall thickness:
 72 channels was selected: it clears the wall limit with 42 K of margin while keeping
 the minimum channel width (0.9 mm) manufacturable and the pressure drop modest.
 
-**Open issue:** the coolant leaves at ~478 K, at the estimated boiling onset of the
-ethanol/water blend at this pressure. Options for the next revision: a small
-fuel film-cooling fraction at the injector, raising coolant pressure, or a lower
-mixture ratio.
+That left one problem: with regenerative cooling alone, the coolant leaves at ~478 K,
+right at the estimated boiling onset of the ethanol/water blend at this pressure.
+
+### Film cooling trade study
+
+To fix the coolant temperature, part of the fuel is injected along the wall as a
+film. It forms a cool, fuel-rich layer that gradually mixes with the hot core gas
+([`film.py`](engine_design/film.py)).
+
+The mixing rate is set by a turbulent mixing coefficient K<sub>t</sub> that is not
+known before hot-fire testing. The design therefore has to pass across a
+**16× range of K<sub>t</sub>** (0.0025–0.04), not just at a nominal value
+(`python examples/film_trade_study.py`):
+
+![Film cooling trade study](outputs/E5-75/film_trade.png)
+
+| Film fuel | Coolant out, worst case | Hot wall, worst case | Isp penalty, worst case |
+|---|---|---|---|
+| 0 % | 478 K ✗ | 758 K | none |
+| 3 % | 457 K ✗ | 752 K | 0.7 % |
+| **5 %** | **447 K ✓** | **747 K ✓** | **1.1 %** |
+| 8 % | 435 K ✓ | 737 K ✓ | 1.9 % |
+
+**5 % film was selected**: the smallest fraction that keeps the coolant at least
+30 K below boiling and the wall under its limit at every K<sub>t</sub> in the
+range. At the nominal K<sub>t</sub> = 0.01, the hot wall drops from 758 K to
+658 K and the regen heat load from 525 kW to 276 kW.
+
+![Film cooling wall layer](outputs/E5-75/film.png)
+
+**Follow-up:** the film is sized as 32 × 0.31 mm orifices, which is hard to drill
+reliably. A continuous film slot, or fewer, larger orifices with a splash ring,
+should be used instead.
 
 ## Method
 
@@ -69,6 +100,7 @@ mixture ratio.
 | [`nozzle.py`](engine_design/nozzle.py) | Chamber volume from L\*, a converging section (fillet, cone, 1.5 Rt arc), and a Rao thrust-optimised parabolic bell (0.382 Rt arc, then a quadratic Bézier between θn and θe). |
 | [`injector.py`](engine_design/injector.py) | Unlike-doublet orifice sizing from ṁ = C<sub>d</sub>A√(2ρΔp), plus the spray resultant angle from the momentum balance. |
 | [`cooling.py`](engine_design/cooling.py) | Bartz gas-side coefficient with the σ correction and recovery-factor adiabatic wall temperature. 1-D wall conduction. Dittus-Boelter coolant side with rib fin efficiency. Counterflow march of coolant energy and pressure (Blasius friction). |
+| [`film.py`](engine_design/film.py) | Fuel film cooling as a two-stream model. Core gas is entrained into the wall layer at d(ṁ<sub>e</sub>)/ds = 2K<sub>t</sub>ṁ<sub>core</sub>/r. The layer's temperature is the equilibrium flame temperature at its local O/F, and Isp is the mass average of the core and wall streams. Sizing is iterated because the film penalty changes the throat size. |
 | [`engine.py`](engine_design/engine.py) | Ties everything together: optional Isp-optimal O/F, delivered Isp = η<sub>c\*</sub>η<sub>Cf</sub>·Isp<sub>ideal</sub>, ṁ = F / (Isp g₀), A<sub>t</sub> = ṁ c\* / P<sub>c</sub>. |
 
 ## Validation
@@ -90,13 +122,15 @@ The tests (`pytest`) also check:
 - that the thrust equation closes both ways (ṁ·Isp·g₀ and C<sub>f</sub>·P<sub>c</sub>·A<sub>t</sub>)
 - the orifice flow round trip
 - that the coolant energy balance matches the integrated wall heat load
+- film cooling behaviour: the wall-layer O/F starts at zero and rises monotonically without exceeding the core O/F; film lowers wall temperature at an Isp cost; faster mixing weakens the film
 
 ## Limitations
 
 This is a preliminary-design tool. Known simplifications:
 - The Rao angles θn and θe are read from charts to about ±1°. A method-of-characteristics contour is planned.
 - Bartz generally over-predicts throat heat flux for small engines, which makes these results conservative.
-- The model leaves out film cooling, radiation, soot or carbon deposits, and axial conduction in the wall.
+- The model leaves out radiation, soot or carbon deposits, and axial conduction in the wall.
+- The film mixing coefficient K<sub>t</sub> is an assumed parameter, which is why the design is checked across a 16× range. The film is treated as immediately vaporised. Below O/F 0.1, the wall-layer temperature is interpolated linearly to the fuel's boiling point. The product species do not include condensed carbon (soot).
 - The coolant is modelled as single-phase with constant properties except viscosity. Boiling and supercritical behaviour are not modelled.
 - Combustion efficiency and nozzle efficiency are user inputs, not predicted.
 
@@ -107,5 +141,6 @@ python -m venv .venv
 .venv\Scripts\activate
 pip install -r requirements.txt
 python examples/design_5kN_lox_ethanol.py
+python examples/film_trade_study.py
 pytest
 ```

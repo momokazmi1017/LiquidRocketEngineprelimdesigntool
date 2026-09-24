@@ -31,6 +31,10 @@ spec = EngineSpec(
     # Chosen from a channel trade study (see README): keeps the hot wall under the
     # CuCrZr limit with ~22 m/s coolant velocity at the throat.
     channels=cooling.Channels(n=72, height=0.8e-3, rib_width=1.0e-3, wall_thickness=0.7e-3),
+    # 5 % of the fuel as a wall film keeps the coolant below boiling across the
+    # whole plausible range of the mixing coefficient (see film_trade_study.py).
+    film_fraction=0.05,
+    film_mixing=0.01,
     n_elements=16,
 )
 

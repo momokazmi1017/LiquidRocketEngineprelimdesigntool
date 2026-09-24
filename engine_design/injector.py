@@ -26,6 +26,7 @@ class InjectorDesign:
     fuel: OrificeSet
     resultant_angle_deg: float
     momentum_ratio: float    # ox / fuel
+    film: OrificeSet | None = None   # wall film orifices around the injector edge
 
 
 def size_orifices(name, mdot, rho, dp, n, cd=0.7) -> OrificeSet:

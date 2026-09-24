@@ -82,3 +82,39 @@ def test_engine_design_closes_on_thrust():
     assert c.Q_total == pytest.approx(d.mdot_fuel * spec.coolant.cp * (c.T_cool_out - c.T_cool[-1]), rel=1e-6)
     # Peak heat flux sits at the throat
     assert abs(c.x[np.argmax(c.q)]) < 0.1 * d.geom.Rt * 2
+
+
+def _film_spec(film_fraction, film_mixing=0.01):
+    return EngineSpec("t", LOX, ETHANOL_75, thrust=5000.0, pc=25e5, of=1.3,
+                      coolant=cooling.ETHANOL_75,
+                      channels=cooling.Channels(72, 0.8e-3, 1.0e-3, 0.7e-3),
+                      film_fraction=film_fraction, film_mixing=film_mixing)
+
+
+def test_film_wall_layer_physics():
+    d = design(_film_spec(0.05))
+    f = d.film
+    # Pure film fuel at the injector, then core gas mixes in monotonically,
+    # never exceeding the core mixture ratio.
+    assert f.of_wall[0] == pytest.approx(0.0)
+    assert np.all(np.diff(f.of_wall) >= -1e-12)
+    assert f.of_wall.max() < f.of_core
+    # Removing 5 % of the fuel from the core raises the core mixture ratio.
+    assert f.of_core == pytest.approx(1.3 / 0.95, rel=1e-9)
+    # Thrust still closes with the film penalty included.
+    assert d.mdot * d.isp * G0 == pytest.approx(5000.0, rel=1e-9)
+
+
+def test_film_cools_the_wall_and_costs_isp():
+    base = design(_film_spec(0.0))
+    film = design(_film_spec(0.05))
+    assert base.film is None
+    assert film.cool.summary()["max_hot_wall_T_K"] < base.cool.summary()["max_hot_wall_T_K"]
+    assert film.cool.T_cool_out < base.cool.T_cool_out
+    assert film.isp < base.isp
+
+
+def test_faster_mixing_weakens_the_film():
+    slow = design(_film_spec(0.05, film_mixing=0.0025)).cool.summary()["max_hot_wall_T_K"]
+    fast = design(_film_spec(0.05, film_mixing=0.04)).cool.summary()["max_hot_wall_T_K"]
+    assert slow < fast

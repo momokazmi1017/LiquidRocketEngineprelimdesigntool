@@ -10,8 +10,10 @@ The coolant (all of the fuel) enters at the nozzle exit and flows toward the
 injector (counterflow). At each station the three thermal resistances are
 solved in series, then the coolant energy and momentum balances are marched.
 
-Simplifications, stated so the results are read in context: no film cooling,
-no radiation, no soot/carbon deposit resistance, no axial wall conduction,
+Film cooling enters through an optional wall-layer stagnation temperature
+profile (see film.py).
+
+Simplifications, stated so the results are read in context: no radiation, no soot/carbon deposit resistance, no axial wall conduction,
 single-phase coolant with temperature-dependent viscosity only, and ideal-gas
 isentropic Mach number with the chamber frozen gamma.
 """
@@ -119,7 +121,9 @@ def bartz_prefactor(Dt, pc, cstar, cp, gamma, T0, molar_mass, R_curv):
 
 def regen_analysis(geom: ChamberGeometry, *, pc, cstar, T0, gamma, cp_gas, molar_mass,
                    mdot_coolant, coolant: Coolant, wall: Wall, channels: Channels,
-                   T_cool_in=298.15, p_cool_in=None, n_stations=400) -> CoolingResult:
+                   T_cool_in=298.15, p_cool_in=None, n_stations=400, T0_wall=None) -> CoolingResult:
+    """T0_wall: optional function x -> local stagnation temperature of the gas next to
+    the wall (film cooling). Defaults to the core chamber temperature T0 everywhere."""
     # Resample the contour uniformly in arc length.
     s_raw = np.concatenate([[0], np.cumsum(np.hypot(np.diff(geom.x), np.diff(geom.r)))])
     s = np.linspace(0, s_raw[-1], n_stations)
@@ -146,7 +150,8 @@ def regen_analysis(geom: ChamberGeometry, *, pc, cstar, T0, gamma, cp_gas, molar
         area_ratio = (r[i] / geom.Rt) ** 2
         M = mach_from_area(area_ratio, g, supersonic=x[i] > 0)
         stag = 1 + (g - 1) / 2 * M * M
-        T_aw = T0 * (1 + rec * (g - 1) / 2 * M * M) / stag
+        T0_loc = T0 if T0_wall is None else float(T0_wall(x[i]))
+        T_aw = T0_loc * (1 + rec * (g - 1) / 2 * M * M) / stag
 
         # Coolant side
         width = (2 * np.pi * (r[i] + ch.wall_thickness) - ch.n * ch.rib_width) / ch.n
@@ -166,7 +171,7 @@ def regen_analysis(geom: ChamberGeometry, *, pc, cstar, T0, gamma, cp_gas, molar
         # Gas side (Bartz). Iterate on hot-wall temperature because sigma depends on it.
         T_wg = 0.5 * (T_aw + T_c)
         for _ in range(20):
-            sigma = 1.0 / ((0.5 * T_wg / T0 * stag + 0.5) ** 0.68 * stag ** 0.12)
+            sigma = 1.0 / ((0.5 * T_wg / T0_loc * stag + 0.5) ** 0.68 * stag ** 0.12)
             h_g = C_bartz * (1.0 / area_ratio) ** 0.9 * sigma
             q = (T_aw - T_c) / (1 / h_g + ch.wall_thickness / wall.k + 1 / h_c_eff)
             T_new = T_aw - q / h_g

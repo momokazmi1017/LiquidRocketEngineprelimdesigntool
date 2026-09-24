@@ -84,11 +84,18 @@ class _Expansion:
         h0 = w_ox * ox.h_per_kg() + w_f * fuel.h_per_kg()
 
         # Start from atoms, equilibrate at a guess temperature, then impose the
-        # reactant enthalpy and find the adiabatic flame state.
-        gas.TPX = 3000.0, pc, {el: n for el, n in atoms.items() if n > 0}
-        gas.equilibrate("TP")
-        gas.HP = h0, pc
-        gas.equilibrate("HP")
+        # reactant enthalpy and find the adiabatic flame state. Very fuel-rich
+        # mixtures burn cool and need a lower starting guess to converge.
+        for T_guess in (3000.0, 1000.0):
+            try:
+                gas.TPX = T_guess, pc, {el: n for el, n in atoms.items() if n > 0}
+                gas.equilibrate("TP")
+                gas.HP = h0, pc
+                gas.equilibrate("HP")
+                break
+            except ct.CanteraError:
+                if T_guess == 1000.0:
+                    raise
 
         self.gas = gas
         self.pc = pc
@@ -133,7 +140,18 @@ def performance(ox: Propellant, fuel: Propellant, of: float, pc: float,
     cstar = pc / Gt
 
     if pe is None:
-        pe = brentq(lambda p: Gt / ex.mass_flux(p) - eps, 1e-6 * pc, 0.999 * pt, xtol=1e-9 * pc)
+        # Step down from the throat until the area ratio is bracketed, so the
+        # search never probes pressures far below the answer (where very
+        # fuel-rich mixtures would expand to unphysical temperatures).
+        def f(p):
+            return Gt / ex.mass_flux(p) - eps
+
+        hi = lo = 0.999 * pt
+        while f(lo) < 0:
+            hi, lo = lo, 0.3 * lo
+            if lo < 1e-6 * pc:
+                raise ValueError(f"area ratio {eps} not reached above 1e-6 * pc")
+        pe = brentq(f, lo, hi, xtol=1e-9 * pc)
     Te, rho_e, ve = ex.state(pe)
     eps = Gt / (rho_e * ve)
 
@@ -145,6 +163,11 @@ def performance(ox: Propellant, fuel: Propellant, of: float, pc: float,
         pt=pt, Tt=Tt, cstar=cstar,
         eps=eps, pe=pe, Te=Te, ve=ve, isp_vac=isp_vac, shifting=shifting,
     )
+
+
+def chamber_temperature(ox: Propellant, fuel: Propellant, of: float, pc: float) -> float:
+    """Adiabatic equilibrium flame temperature (K) at mixture ratio `of` and pressure pc."""
+    return _Expansion(ox, fuel, of, pc, shifting=True).Tc
 
 
 def of_sweep(ox, fuel, pc, of_values, pa=101_325.0, eps=None, pe=None, shifting=True):
