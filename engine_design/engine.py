@@ -3,7 +3,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-from . import cooling, film, injector, nozzle
+from . import cooling, film, injector, moc, nozzle
 from .combustion import G0, Performance, optimum_of, performance
 from .film import FilmResult
 from .propellants import Propellant
@@ -22,11 +22,15 @@ class EngineSpec:
     pe: float | None = None       # exit pressure; defaults to pa (optimum expansion)
     eps: float | None = None      # or specify area ratio instead
     eta_cstar: float = 0.95       # combustion efficiency
-    eta_cf: float = 0.98          # nozzle efficiency (divergence, boundary layer)
+    # Nozzle efficiency. A number is used as given; None computes it as the
+    # MOC divergence efficiency of the actual bell times eta_bl.
+    eta_cf: float | None = 0.98
+    eta_bl: float = 0.99          # boundary-layer / friction loss (used when eta_cf is None)
     L_star: float = 1.1           # characteristic length, m
     contraction_ratio: float = 6.0
     theta_c: float = 30.0         # converging half-angle, deg
-    bell_fraction: float = 0.8
+    bell: str = "rao"             # "rao" (chart TOP) or "tic" (MOC truncated ideal contour)
+    bell_fraction: float = 0.8    # bell length / 15 deg cone length
     # Cooling
     coolant: cooling.Coolant | None = None   # None -> no regen analysis
     wall: cooling.Wall = cooling.CUCRZR
@@ -57,6 +61,8 @@ class EngineDesign:
     inj: injector.InjectorDesign
     cool: cooling.CoolingResult | None = field(default=None)
     film: FilmResult | None = field(default=None)
+    nozzle_flow: moc.NozzleFlow | None = field(default=None)
+    eta_cf: float = 0.0           # nozzle efficiency actually used
 
     def summary(self) -> dict:
         s, g, p = self.spec, self.geom, self.perf
@@ -85,14 +91,23 @@ class EngineDesign:
             "chamber_length_mm": 1e3 * g.L_chamber,
             "nozzle_length_mm": 1e3 * g.L_nozzle,
             "overall_length_mm": 1e3 * (g.L_chamber + g.L_nozzle),
-            "rao_theta_n_deg": g.theta_n,
-            "rao_theta_e_deg": g.theta_e,
+            "bell_type": s.bell,
+            "bell_theta_n_deg": g.theta_n,
+            "bell_theta_e_deg": g.theta_e,
+            "eta_cf_used": self.eta_cf,
             "injector_ox_orifice_mm": self.inj.ox.d * 1e3,
             "injector_fuel_orifice_mm": self.inj.fuel.d * 1e3,
             "injector_ox_velocity_m_s": self.inj.ox.v,
             "injector_fuel_velocity_m_s": self.inj.fuel.v,
             "injector_resultant_angle_deg": self.inj.resultant_angle_deg,
         }
+        if self.nozzle_flow is not None:
+            nf = self.nozzle_flow
+            d.update({
+                "nozzle_moc_vacuum_efficiency": nf.efficiency,
+                "nozzle_moc_momentum_efficiency": nf.momentum_efficiency,
+                "nozzle_moc_weak_shock_merges": nf.merges,
+            })
         if self.film is not None:
             f = self.film
             d.update({
@@ -119,6 +134,14 @@ def design(spec: EngineSpec) -> EngineDesign:
         spec.oxidizer, spec.fuel, spec.pc, spec.of_bounds, pa=spec.pa, **exp)
     perf = performance(spec.oxidizer, spec.fuel, of, spec.pc, **exp)
 
+    # Nozzle efficiency. The bell's shape (normalised by Rt) depends only on
+    # the area ratio, so its MOC analysis does not depend on the sizing below.
+    # The divergence loss at optimum expansion is a loss of jet momentum, so the
+    # momentum efficiency applies (constant frozen gamma from the chamber).
+    xn, rn, _, _ = nozzle.diverging_contour(perf.eps, spec.bell_fraction, spec.bell, perf.gamma_c)
+    nozzle_flow = moc.analyze(xn, rn, perf.gamma_c)
+    eta_cf = spec.eta_cf if spec.eta_cf is not None else nozzle_flow.momentum_efficiency * spec.eta_bl
+
     # Ideal performance; with film cooling this becomes the two-stream value,
     # which depends on the geometry, which depends on the performance, so the
     # sizing is iterated to convergence.
@@ -126,7 +149,7 @@ def design(spec: EngineSpec) -> EngineDesign:
     fr = None
     for _ in range(10):
         # Delivered performance: Isp = eta_c* * eta_cf * Isp_ideal
-        isp = spec.eta_cstar * spec.eta_cf * isp_ideal
+        isp = spec.eta_cstar * eta_cf * isp_ideal
         cstar = spec.eta_cstar * cstar_ideal
         cf = isp * G0 / cstar
 
@@ -134,7 +157,8 @@ def design(spec: EngineSpec) -> EngineDesign:
         At = mdot * cstar / spec.pc
         Rt = np.sqrt(At / np.pi)
         geom = nozzle.chamber_contour(Rt, perf.eps, spec.contraction_ratio, spec.L_star,
-                                      spec.theta_c, spec.bell_fraction)
+                                      spec.theta_c, spec.bell_fraction, bell=spec.bell,
+                                      gamma=perf.gamma_c)
         if spec.film_fraction <= 0:
             break
         T_film0 = spec.coolant.T_limit if spec.coolant is not None else 400.0
@@ -171,4 +195,4 @@ def design(spec: EngineSpec) -> EngineDesign:
         )
 
     return EngineDesign(spec, perf, of, isp_ideal, isp, cstar, cf, mdot, mdot_ox, mdot_f,
-                        At, geom, inj, cool, fr)
+                        At, geom, inj, cool, fr, nozzle_flow, eta_cf)

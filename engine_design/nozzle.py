@@ -3,17 +3,24 @@
 Converging section: cylinder -> fillet (radius Rf) -> straight cone (half-angle
 theta_c) -> upstream throat arc (1.5 Rt).
 
-Diverging section: Rao thrust-optimised parabola (TOP) approximation —
-downstream throat arc (0.382 Rt) to the inflection angle theta_n, then a
-quadratic Bezier to the exit at angle theta_e. theta_n and theta_e come from
-Rao's charts as reproduced in Huzel & Huang (Fig. 4-16), digitised to about
-+/- 1 deg.
+Diverging section, either:
+- "rao": Rao thrust-optimised parabola (TOP) approximation — downstream
+  throat arc (0.382 Rt) to the inflection angle theta_n, then a quadratic
+  Bezier to the exit at angle theta_e. theta_n and theta_e come from Rao's
+  charts as reproduced in Huzel & Huang (Fig. 4-16), digitised to about
+  +/- 1 deg.
+- "tic": truncated ideal contour designed with the method of characteristics
+  (moc.py), with the same length convention.
 
 The throat sits at x = 0; the injector face is at a negative x.
 """
 from dataclasses import dataclass
+from functools import lru_cache
 
 import numpy as np
+
+from . import moc
+from .moc import cone_length
 
 # Approximate Rao angles for a bell whose length is a fraction of a 15 deg cone.
 _RAO_EPS = np.array([4.0, 5.0, 10.0, 20.0, 30.0, 40.0, 50.0, 100.0])
@@ -28,6 +35,9 @@ _RAO_TABLE = {
 
 def rao_angles(eps: float, length_frac: float = 0.8) -> tuple[float, float]:
     """(theta_n, theta_e) in degrees for a Rao TOP bell. Interpolated in log(eps)."""
+    if length_frac not in _RAO_TABLE:
+        raise ValueError(f"Rao chart angles are tabulated for length fractions {sorted(_RAO_TABLE)}; "
+                         f"use bell='tic' for other lengths")
     tn, te = _RAO_TABLE[length_frac]
     x = np.log(np.clip(eps, _RAO_EPS[0], _RAO_EPS[-1]))
     return float(np.interp(x, np.log(_RAO_EPS), tn)), float(np.interp(x, np.log(_RAO_EPS), te))
@@ -81,8 +91,42 @@ def _converging(Rt, Rc, theta_c, Rf, Ru, n):
     return x, r
 
 
+def diverging_contour(eps: float, length_frac: float = 0.8, bell: str = "rao",
+                      gamma: float | None = None, n: int = 60):
+    """Bell from the throat to the exit, normalised by Rt: (x, r, theta_n, theta_e).
+
+    bell="rao": Rao thrust-optimised parabola approximation (chart angles).
+    bell="tic": truncated ideal contour designed by the method of characteristics
+                (needs gamma); theta_n is the attachment angle of the throat arc.
+    """
+    Rd = 0.382
+    if bell == "tic":
+        if gamma is None:
+            raise ValueError("bell='tic' needs gamma")
+        t = _tic_cached(round(eps, 4), round(gamma, 4), round(length_frac, 4))
+        return t.x, t.r, t.theta_attach_deg, t.theta_exit_deg
+    if bell != "rao":
+        raise ValueError(f"unknown bell type {bell!r}")
+    tn, te = rao_angles(eps, length_frac)
+    xd, rd = _arc(0.0, 1 + Rd, Rd, -np.pi / 2, -np.pi / 2 + np.radians(tn), n)
+    N = np.array([xd[-1], rd[-1]])
+    Ln = length_frac * cone_length(eps)
+    E = np.array([Ln, np.sqrt(eps)])
+    m1, m2 = np.tan(np.radians(tn)), np.tan(np.radians(te))
+    c1, c2 = N[1] - m1 * N[0], E[1] - m2 * E[0]
+    Q = np.array([(c2 - c1) / (m1 - m2), (m1 * c2 - m2 * c1) / (m1 - m2)])
+    xb, rb = _bezier(N, Q, E, 3 * n)
+    return np.concatenate([xd, xb[1:]]), np.concatenate([rd, rb[1:]]), tn, te
+
+
+@lru_cache(maxsize=32)
+def _tic_cached(eps, gamma, length_frac):
+    return moc.tic_contour(eps, gamma, length_frac)
+
+
 def chamber_contour(Rt: float, eps: float, contraction_ratio: float, L_star: float,
-                    theta_c: float = 30.0, length_frac: float = 0.8, n: int = 60) -> ChamberGeometry:
+                    theta_c: float = 30.0, length_frac: float = 0.8, n: int = 60,
+                    bell: str = "rao", gamma: float | None = None) -> ChamberGeometry:
     """Build the full inner wall contour from the injector face to the nozzle exit."""
     At = np.pi * Rt ** 2
     Rc = Rt * np.sqrt(contraction_ratio)
@@ -103,21 +147,14 @@ def chamber_contour(Rt: float, eps: float, contraction_ratio: float, L_star: flo
     xcyl = np.linspace(x_inj, xcv[0], n)
     rcyl = np.full_like(xcyl, Rc)
 
-    # Diverging bell
-    tn, te = rao_angles(eps, length_frac)
-    xd, rd = _arc(0.0, Rt + Rd, Rd, -np.pi / 2, -np.pi / 2 + np.radians(tn), n)
-    N = np.array([xd[-1], rd[-1]])
-    Ln = length_frac * (np.sqrt(eps) - 1) * Rt / np.tan(np.radians(15.0))
-    E = np.array([Ln, Re])
-    m1, m2 = np.tan(np.radians(tn)), np.tan(np.radians(te))
-    c1, c2 = N[1] - m1 * N[0], E[1] - m2 * E[0]
-    Q = np.array([(c2 - c1) / (m1 - m2), (m1 * c2 - m2 * c1) / (m1 - m2)])
-    xb, rb = _bezier(N, Q, E, 3 * n)
+    # Diverging bell (normalised shape, scaled by Rt)
+    xd, rd, tn, te = diverging_contour(eps, length_frac, bell, gamma, n)
+    xd, rd = Rt * xd, Rt * rd
 
-    x = np.concatenate([xcyl, xcv[1:], xd[1:], xb[1:]])
-    r = np.concatenate([rcyl, rcv[1:], rd[1:], rb[1:]])
+    x = np.concatenate([xcyl, xcv[1:], xd[1:]])
+    r = np.concatenate([rcyl, rcv[1:], rd[1:]])
 
     return ChamberGeometry(
-        x=x, r=r, Rt=Rt, Rc=Rc, Re=Re, L_cyl=L_cyl, L_chamber=-x_inj, L_nozzle=Ln,
+        x=x, r=r, Rt=Rt, Rc=Rc, Re=Re, L_cyl=L_cyl, L_chamber=-x_inj, L_nozzle=float(xd[-1]),
         V_chamber=V_c, theta_n=tn, theta_e=te, R_throat_curv=0.5 * (Ru + Rd),
     )

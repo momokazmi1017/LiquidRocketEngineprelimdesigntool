@@ -78,9 +78,12 @@ def plot_contour(design, path):
     for xx, rr, dy, t in notes:
         ax.annotate(t, (xx, rr), xytext=(0, dy), textcoords="offset points", ha="center", fontsize=9,
                     color=INK_2, bbox=dict(boxstyle="square,pad=0.15", fc="#cde2fb" if dy < 0 else SURFACE, lw=0))
+    bell = {"rao": "Rao TOP", "tic": "MOC truncated ideal"}[design.spec.bell]
+    eff = "" if design.nozzle_flow is None else \
+        f"   MOC divergence efficiency {design.nozzle_flow.momentum_efficiency:.4f}"
     ax.text(0.99, 0.04,
             f"ε = {design.perf.eps:.2f}   L* = {design.spec.L_star:.2f} m   "
-            f"Rao {design.spec.bell_fraction:.0%} bell, θn {g.theta_n:.1f}°, θe {g.theta_e:.1f}°",
+            f"{bell} {design.spec.bell_fraction:.0%} bell, θn {g.theta_n:.1f}°, θe {g.theta_e:.1f}°{eff}",
             transform=ax.transAxes, ha="right", fontsize=9, color=INK_2)
     fig.savefig(path, dpi=160)
     plt.close(fig)
